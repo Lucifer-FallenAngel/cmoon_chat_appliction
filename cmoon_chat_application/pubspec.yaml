@@ -1,0 +1,35 @@
+name: cmoon_chat_application
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.4
+
+dependencies:
+  flutter:
+    sdk: flutter
+  image_picker: ^1.0.7
+  http: ^1.2.0
+  socket_io_client: ^2.0.3
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  http: ^1.2.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - images/first/Cmoonlogo.png
+    - images/first/chat_logo.png
+    - images/get_started/1.png
+    - images/get_started/2.png
+    - images/get_started/3.png
+    - images/get_started/4.png
+    - images/upload_pic/upload_pic.png
