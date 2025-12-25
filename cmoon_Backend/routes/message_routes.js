@@ -11,7 +11,7 @@ const BlockedUser = db.BlockedUser;
 router.post('/send', async (req, res) => {
   const { sender_id, receiver_id, message } = req.body;
 
-  // 🚫 block check
+  // 🚫 block check: prevent sending if either party has blocked the other
   const blocked = await BlockedUser.findOne({
     where: {
       [Op.or]: [
@@ -47,13 +47,13 @@ router.post('/send', async (req, res) => {
     receiver_id,
     message,
     status: 'sent',
-    deleted_for: [],
+    deleted_for: [], 
   });
 
   res.json(msg);
 });
 
-// ---------------- LOAD CHAT (FIXED) ----------------
+// ---------------- LOAD CHAT ----------------
 router.get('/:user1/:user2', async (req, res) => {
   const user1 = parseInt(req.params.user1);
   const user2 = parseInt(req.params.user2);
@@ -73,7 +73,7 @@ router.get('/:user1/:user2', async (req, res) => {
     where: {
       conversation_id: convo.id,
       [Op.and]: [
-        // ✅ THIS IS THE FIX
+        // Only load messages NOT marked as deleted for this specific user
         literal(`NOT JSON_CONTAINS(deleted_for, '${user1}')`),
       ],
     },
@@ -90,14 +90,13 @@ router.post('/delete-for-me', async (req, res) => {
   const msg = await Message.findByPk(messageId);
   if (!msg) return res.sendStatus(404);
 
-  const deletedFor = msg.deleted_for || [];
-
+  let deletedFor = msg.deleted_for || [];
   if (!deletedFor.includes(userId)) {
     deletedFor.push(userId);
   }
 
-  msg.deleted_for = deletedFor;
-  await msg.save();
+  // Use update to ensure JSON changes persist in the database
+  await msg.update({ deleted_for: deletedFor });
 
   res.sendStatus(200);
 });
@@ -121,12 +120,12 @@ router.post('/clear-chat', async (req, res) => {
     where: { conversation_id: convo.id },
   });
 
+  // Permanently mark every message in the conversation as deleted for this user
   for (const msg of messages) {
-    const deletedFor = msg.deleted_for || [];
+    let deletedFor = msg.deleted_for || [];
     if (!deletedFor.includes(userId)) {
       deletedFor.push(userId);
-      msg.deleted_for = deletedFor;
-      await msg.save();
+      await msg.update({ deleted_for: deletedFor });
     }
   }
 
@@ -136,15 +135,17 @@ router.post('/clear-chat', async (req, res) => {
 // ---------------- BLOCK USER ----------------
 router.post('/block', async (req, res) => {
   const { blocker_id, blocked_id } = req.body;
-
-  const exists = await BlockedUser.findOne({
-    where: { blocker_id, blocked_id },
-  });
-
+  const exists = await BlockedUser.findOne({ where: { blocker_id, blocked_id } });
   if (!exists) {
     await BlockedUser.create({ blocker_id, blocked_id });
   }
+  res.sendStatus(200);
+});
 
+// ---------------- UNBLOCK USER ----------------
+router.post('/unblock', async (req, res) => {
+  const { blocker_id, blocked_id } = req.body;
+  await BlockedUser.destroy({ where: { blocker_id, blocked_id } });
   res.sendStatus(200);
 });
 
@@ -152,16 +153,13 @@ router.post('/block', async (req, res) => {
 router.get('/is-blocked/:me/:other', async (req, res) => {
   const { me, other } = req.params;
 
-  const blocked = await BlockedUser.findOne({
-    where: {
-      [Op.or]: [
-        { blocker_id: me, blocked_id: other },
-        { blocker_id: other, blocked_id: me },
-      ],
-    },
-  });
+  const IBlockedThem = await BlockedUser.findOne({ where: { blocker_id: me, blocked_id: other } });
+  const TheyBlockedMe = await BlockedUser.findOne({ where: { blocker_id: other, blocked_id: me } });
 
-  res.json({ blocked: !!blocked });
+  res.json({ 
+    blocked: !!(IBlockedThem || TheyBlockedMe),
+    iBlocked: !!IBlockedThem 
+  });
 });
 
 module.exports = router;

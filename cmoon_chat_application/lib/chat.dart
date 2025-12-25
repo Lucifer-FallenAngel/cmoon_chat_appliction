@@ -25,6 +25,7 @@ class _ChatPageState extends State<ChatPage> {
   final ScrollController scrollController = ScrollController();
 
   bool isBlocked = false;
+  bool iAmTheBlocker = false;
 
   @override
   void initState() {
@@ -44,7 +45,10 @@ class _ChatPageState extends State<ChatPage> {
 
     if (res.statusCode == 200) {
       final data = jsonDecode(res.body);
-      setState(() => isBlocked = data['blocked']);
+      setState(() {
+        isBlocked = data['blocked'];
+        iAmTheBlocker = data['iBlocked'];
+      });
     }
   }
 
@@ -68,7 +72,6 @@ class _ChatPageState extends State<ChatPage> {
   // ---------------- SOCKET ----------------
   void _setupSocket() {
     widget.socket.off('receive-message');
-
     widget.socket.on('receive-message', (data) {
       if (data['sender_id'] == widget.otherUser['id']) {
         setState(() => messages.add(Map<String, dynamic>.from(data)));
@@ -129,10 +132,12 @@ class _ChatPageState extends State<ChatPage> {
     setState(() => messages.clear());
   }
 
-  // ---------------- BLOCK USER ----------------
-  Future<void> _blockUser() async {
+  // ---------------- BLOCK / UNBLOCK ----------------
+  Future<void> _toggleBlock() async {
+    final String endpoint = iAmTheBlocker ? 'unblock' : 'block';
+
     await http.post(
-      Uri.parse('http://10.0.2.2:5000/api/messages/block'),
+      Uri.parse('http://10.0.2.2:5000/api/messages/$endpoint'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
         'blocker_id': widget.myId,
@@ -140,7 +145,7 @@ class _ChatPageState extends State<ChatPage> {
       }),
     );
 
-    setState(() => isBlocked = true);
+    _checkBlocked(); // Refresh block status from server
   }
 
   void _scrollBottom() {
@@ -170,7 +175,12 @@ class _ChatPageState extends State<ChatPage> {
               if (v == 'block') _confirmBlock();
             },
             itemBuilder: (_) => [
-              const PopupMenuItem(value: 'block', child: Text('Block Contact')),
+              PopupMenuItem(
+                value: 'block',
+                child: Text(
+                  iAmTheBlocker ? 'Unblock Contact' : 'Block Contact',
+                ),
+              ),
               const PopupMenuItem(value: 'clear', child: Text('Clear Chat')),
             ],
           ),
@@ -179,7 +189,7 @@ class _ChatPageState extends State<ChatPage> {
       body: Container(
         decoration: const BoxDecoration(
           image: DecorationImage(
-            image: AssetImage('images/chat_bg.png'), // WhatsApp-style bg
+            image: AssetImage('images/chat_bg.png'),
             fit: BoxFit.cover,
           ),
         ),
@@ -195,9 +205,7 @@ class _ChatPageState extends State<ChatPage> {
                   final isMe = m['sender_id'] == widget.myId;
 
                   return GestureDetector(
-                    onLongPress: () {
-                      if (isMe) _confirmDelete(m['id']);
-                    },
+                    onLongPress: () => _confirmDelete(m['id']),
                     child: Align(
                       alignment: isMe
                           ? Alignment.centerRight
@@ -238,7 +246,37 @@ class _ChatPageState extends State<ChatPage> {
               ),
             ),
 
-            if (!isBlocked)
+            if (isBlocked)
+              Container(
+                margin: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.9),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  children: [
+                    Text(
+                      iAmTheBlocker
+                          ? "You have blocked this contact."
+                          : "You cannot reply to this conversation.",
+                      style: const TextStyle(color: Colors.grey),
+                    ),
+                    if (iAmTheBlocker)
+                      TextButton(
+                        onPressed: _toggleBlock,
+                        child: const Text(
+                          "UNBLOCK",
+                          style: TextStyle(
+                            color: Colors.green,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              )
+            else
               Padding(
                 padding: const EdgeInsets.fromLTRB(8, 6, 8, 10),
                 child: Row(
@@ -282,6 +320,9 @@ class _ChatPageState extends State<ChatPage> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Delete Message'),
+        content: const Text(
+          'This message will be deleted for you permanently.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -304,6 +345,9 @@ class _ChatPageState extends State<ChatPage> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Clear Chat?'),
+        content: const Text(
+          'Are you sure you want to clear messages in this chat? This won\'t delete them for the other user.',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -322,13 +366,16 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   void _confirmBlock() {
+    final title = iAmTheBlocker ? 'Unblock Contact?' : 'Block Contact?';
+    final content = iAmTheBlocker
+        ? 'You will be able to send and receive messages again.'
+        : 'Blocked contacts cannot call you or send you messages.';
+
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Block Contact?'),
-        content: const Text(
-          'If you block this contact, you cannot send or receive messages.',
-        ),
+        title: Text(title),
+        content: Text(content),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -337,7 +384,7 @@ class _ChatPageState extends State<ChatPage> {
           TextButton(
             onPressed: () {
               Navigator.pop(context);
-              _blockUser();
+              _toggleBlock();
             },
             child: const Text('Yes'),
           ),
