@@ -41,23 +41,48 @@ class _ChatPageState extends State<ChatPage> {
     });
   }
 
+  // ================= SCROLL =================
   void _scrollBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (scrollController.hasClients) {
         scrollController.animateTo(
           scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
+          duration: const Duration(milliseconds: 250),
           curve: Curves.easeOut,
         );
       }
     });
   }
 
-  // ================= DATE HELPERS =================
-  String formatTime(String iso) {
-    final dt = DateTime.parse(iso).toLocal();
-    return DateFormat('hh:mm a').format(dt);
+  void _showDeleteDialog(int messageId) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text("Delete Message"),
+        content: const Text("Do you want to delete this message?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _deleteForMe(messageId);
+            },
+            child: const Text(
+              "Delete for me",
+              style: TextStyle(color: Colors.green),
+            ),
+          ),
+        ],
+      ),
+    );
   }
+
+  // ================= DATE HELPERS =================
+  String formatTime(String iso) =>
+      DateFormat('hh:mm a').format(DateTime.parse(iso).toLocal());
 
   String formatDateLabel(DateTime date) {
     final now = DateTime.now();
@@ -70,7 +95,7 @@ class _ChatPageState extends State<ChatPage> {
     return DateFormat('d MMMM yyyy').format(date);
   }
 
-  // ================= BLOCK CHECK =================
+  // ================= CHECK BLOCK =================
   Future<void> _checkBlocked() async {
     final res = await http.get(
       Uri.parse(
@@ -111,7 +136,7 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  // ================= SOCKET EVENTS =================
+  // ================= SOCKET =================
   void _setupSocket() {
     widget.socket.off('receive-message');
     widget.socket.off('message-status-update');
@@ -120,11 +145,9 @@ class _ChatPageState extends State<ChatPage> {
     widget.socket.on('receive-message', (_) => _loadMessages());
     widget.socket.on('message-status-update', (_) => _loadMessages());
 
-    // DELETE FOR ME (REALTIME)
     widget.socket.on('message-deleted-for-me', (data) {
-      final id = data['messageId'];
       setState(() {
-        messages.removeWhere((m) => m['id'] == id);
+        messages.removeWhere((m) => m['id'] == data['messageId']);
       });
     });
   }
@@ -173,26 +196,83 @@ class _ChatPageState extends State<ChatPage> {
     });
   }
 
-  // ================= DELETE POPUP =================
-  void _showDeleteDialog(int messageId) {
+  // ================= CLEAR CHAT =================
+  Future<void> _clearChat() async {
+    await http.post(
+      Uri.parse('http://10.0.2.2:5000/api/messages/clear-chat'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'userId': widget.myId,
+        'otherUserId': widget.otherUser['id'],
+      }),
+    );
+
+    setState(() => messages.clear());
+  }
+
+  // ================= BLOCK / UNBLOCK =================
+  Future<void> _blockUser() async {
+    await http.post(
+      Uri.parse('http://10.0.2.2:5000/api/messages/block'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'blocker_id': widget.myId,
+        'blocked_id': widget.otherUser['id'],
+      }),
+    );
+
+    setState(() {
+      isBlocked = true;
+      iAmTheBlocker = true;
+    });
+  }
+
+  Future<void> _unblockUser() async {
+    await http.post(
+      Uri.parse('http://10.0.2.2:5000/api/messages/unblock'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'blocker_id': widget.myId,
+        'blocked_id': widget.otherUser['id'],
+      }),
+    );
+
+    setState(() {
+      isBlocked = false;
+      iAmTheBlocker = false;
+    });
+  }
+
+  // ================= BLOCK CONFIRMATION =================
+  void _showBlockDialog() {
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text("Delete Message"),
+        title: Text(
+          iAmTheBlocker
+              ? "Unblock this contact?"
+              : "Are you sure you want to block this contact?",
+        ),
+        content: Text(
+          iAmTheBlocker
+              ? "You will be able to send and receive messages again."
+              : "If you block this contact, you won't be able to send or receive messages.",
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text("Cancel"),
+            child: const Text("No"),
           ),
           TextButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(context);
-              _deleteForMe(messageId);
+              if (iAmTheBlocker) {
+                await _unblockUser();
+              } else {
+                await _blockUser();
+              }
             },
-            child: const Text(
-              "Delete for me",
-              style: TextStyle(color: Colors.green),
-            ),
+            child: const Text("Yes", style: TextStyle(color: Colors.green)),
           ),
         ],
       ),
@@ -220,6 +300,26 @@ class _ChatPageState extends State<ChatPage> {
       appBar: AppBar(
         backgroundColor: Colors.green,
         title: Text(widget.otherUser['name']),
+        actions: [
+          PopupMenuButton<String>(
+            onSelected: (value) {
+              if (value == 'block') {
+                _showBlockDialog();
+              } else if (value == 'clear') {
+                _clearChat();
+              }
+            },
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                value: 'block',
+                child: Text(
+                  iAmTheBlocker ? 'Unblock Contact' : 'Block Contact',
+                ),
+              ),
+              const PopupMenuItem(value: 'clear', child: Text('Clear Chat')),
+            ],
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -233,7 +333,7 @@ class _ChatPageState extends State<ChatPage> {
                 final isMe = m['sender_id'] == widget.myId;
                 final msgTime = DateTime.parse(m['createdAt']).toLocal();
 
-                bool showDateHeader =
+                final showDateHeader =
                     i == 0 ||
                     DateTime.parse(
                           messages[i - 1]['createdAt'],
@@ -311,6 +411,16 @@ class _ChatPageState extends State<ChatPage> {
               },
             ),
           ),
+
+          if (isBlocked)
+            Container(
+              padding: const EdgeInsets.all(12),
+              color: Colors.red.shade100,
+              child: const Text(
+                "You have blocked this contact",
+                textAlign: TextAlign.center,
+              ),
+            ),
 
           if (!isBlocked)
             Padding(

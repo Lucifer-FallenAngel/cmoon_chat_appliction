@@ -15,7 +15,11 @@ router.post('/send', async (req, res) => {
   try {
     const { sender_id, receiver_id, message } = req.body;
 
-    // 🚫 CHECK BLOCK
+    if (!sender_id || !receiver_id || !message) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    // 🚫 CHECK BLOCK (both directions)
     const blocked = await BlockedUser.findOne({
       where: {
         [Op.or]: [
@@ -64,7 +68,7 @@ router.post('/send', async (req, res) => {
 });
 
 /* ============================================================
-   LOAD CHAT (FILTER "DELETE FOR ME")
+   LOAD CHAT (FILTER DELETE-FOR-ME)
 ============================================================ */
 router.get('/:user1/:user2', async (req, res) => {
   try {
@@ -87,7 +91,7 @@ router.get('/:user1/:user2', async (req, res) => {
       order: [['createdAt', 'ASC']],
     });
 
-    // ✅ FILTER MESSAGES DELETED FOR CURRENT USER
+    // ✅ FILTER DELETED MESSAGES FOR CURRENT USER
     const visibleMessages = allMessages.filter((msg) => {
       const deletedFor = Array.isArray(msg.deleted_for)
         ? msg.deleted_for
@@ -95,7 +99,7 @@ router.get('/:user1/:user2', async (req, res) => {
       return !deletedFor.includes(user1);
     });
 
-    // ✅ UPDATE DELIVERY STATUS
+    // ✅ MARK AS DELIVERED
     await Message.update(
       { status: 'delivered' },
       {
@@ -141,7 +145,7 @@ router.post('/read-all', async (req, res) => {
 });
 
 /* ============================================================
-   DELETE FOR ME (WHATSAPP STYLE)
+   DELETE FOR ME
 ============================================================ */
 router.post('/delete-for-me', async (req, res) => {
   try {
@@ -217,6 +221,10 @@ router.post('/block', async (req, res) => {
   try {
     const { blocker_id, blocked_id } = req.body;
 
+    if (!blocker_id || !blocked_id) {
+      return res.status(400).json({ message: 'Missing parameters' });
+    }
+
     const exists = await BlockedUser.findOne({
       where: { blocker_id, blocked_id },
     });
@@ -238,6 +246,10 @@ router.post('/block', async (req, res) => {
 router.post('/unblock', async (req, res) => {
   try {
     const { blocker_id, blocked_id } = req.body;
+
+    if (!blocker_id || !blocked_id) {
+      return res.status(400).json({ message: 'Missing parameters' });
+    }
 
     await BlockedUser.destroy({
       where: { blocker_id, blocked_id },
