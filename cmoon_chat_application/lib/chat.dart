@@ -45,6 +45,8 @@ class _ChatPageState extends State<ChatPage> {
 
     if (res.statusCode == 200) {
       final data = jsonDecode(res.body);
+      if (!mounted) return;
+
       setState(() {
         isBlocked = data['blocked'];
         iAmTheBlocker = data['iBlocked'];
@@ -52,7 +54,7 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  // ---------------- LOAD MESSAGES ----------------
+  // ---------------- LOAD MESSAGES (DB SOURCE OF TRUTH) ----------------
   Future<void> _loadMessages() async {
     final res = await http.get(
       Uri.parse(
@@ -61,21 +63,27 @@ class _ChatPageState extends State<ChatPage> {
     );
 
     if (res.statusCode == 200) {
+      if (!mounted) return;
+
       setState(() {
-        messages.clear();
-        messages.addAll(List<Map<String, dynamic>>.from(jsonDecode(res.body)));
+        messages
+          ..clear()
+          ..addAll(List<Map<String, dynamic>>.from(jsonDecode(res.body)));
       });
+
       _scrollBottom();
     }
   }
 
-  // ---------------- SOCKET ----------------
+  // ---------------- SOCKET (NOTIFY ONLY) ----------------
   void _setupSocket() {
     widget.socket.off('receive-message');
+
     widget.socket.on('receive-message', (data) {
-      if (data['sender_id'] == widget.otherUser['id']) {
-        setState(() => messages.add(Map<String, dynamic>.from(data)));
-        _scrollBottom();
+      // Reload ONLY if this chat is affected
+      if (data['sender_id'] == widget.otherUser['id'] ||
+          data['receiver_id'] == widget.otherUser['id']) {
+        _loadMessages();
       }
     });
   }
@@ -98,10 +106,14 @@ class _ChatPageState extends State<ChatPage> {
     );
 
     if (res.statusCode == 200) {
-      final msg = jsonDecode(res.body);
-      setState(() => messages.add(msg));
-      widget.socket.emit('send-message', msg);
-      _scrollBottom();
+      // Reload from DB to avoid duplicates / missing messages
+      await _loadMessages();
+
+      // Notify receiver only
+      widget.socket.emit('send-message', {
+        'sender_id': widget.myId,
+        'receiver_id': widget.otherUser['id'],
+      });
     }
   }
 
@@ -113,9 +125,7 @@ class _ChatPageState extends State<ChatPage> {
       body: jsonEncode({'messageId': messageId, 'userId': widget.myId}),
     );
 
-    setState(() {
-      messages.removeWhere((m) => m['id'] == messageId);
-    });
+    await _loadMessages();
   }
 
   // ---------------- CLEAR CHAT ----------------
@@ -134,7 +144,7 @@ class _ChatPageState extends State<ChatPage> {
 
   // ---------------- BLOCK / UNBLOCK ----------------
   Future<void> _toggleBlock() async {
-    final String endpoint = iAmTheBlocker ? 'unblock' : 'block';
+    final endpoint = iAmTheBlocker ? 'unblock' : 'block';
 
     await http.post(
       Uri.parse('http://10.0.2.2:5000/api/messages/$endpoint'),
@@ -145,7 +155,7 @@ class _ChatPageState extends State<ChatPage> {
       }),
     );
 
-    _checkBlocked(); // Refresh block status from server
+    await _checkBlocked();
   }
 
   void _scrollBottom() {
@@ -228,12 +238,6 @@ class _ChatPageState extends State<ChatPage> {
                             bottomLeft: Radius.circular(isMe ? 12 : 0),
                             bottomRight: Radius.circular(isMe ? 0 : 12),
                           ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.05),
-                              blurRadius: 4,
-                            ),
-                          ],
                         ),
                         child: Text(
                           m['message'],
@@ -246,70 +250,75 @@ class _ChatPageState extends State<ChatPage> {
               ),
             ),
 
-            if (isBlocked)
-              Container(
-                margin: const EdgeInsets.all(12),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.9),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Column(
-                  children: [
-                    Text(
-                      iAmTheBlocker
-                          ? "You have blocked this contact."
-                          : "You cannot reply to this conversation.",
-                      style: const TextStyle(color: Colors.grey),
-                    ),
-                    if (iAmTheBlocker)
-                      TextButton(
-                        onPressed: _toggleBlock,
-                        child: const Text(
-                          "UNBLOCK",
-                          style: TextStyle(
-                            color: Colors.green,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              )
-            else
-              Padding(
-                padding: const EdgeInsets.fromLTRB(8, 6, 8, 10),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(30),
-                        ),
-                        child: TextField(
-                          controller: controller,
-                          decoration: const InputDecoration(
-                            hintText: 'Type message',
-                            border: InputBorder.none,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    CircleAvatar(
-                      backgroundColor: Colors.green,
-                      child: IconButton(
-                        icon: const Icon(Icons.send, color: Colors.white),
-                        onPressed: _sendMessage,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+            if (isBlocked) _blockedUI() else _inputUI(),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _blockedUI() {
+    return Container(
+      margin: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        children: [
+          Text(
+            iAmTheBlocker
+                ? "You have blocked this contact."
+                : "You cannot reply to this conversation.",
+            style: const TextStyle(color: Colors.grey),
+          ),
+          if (iAmTheBlocker)
+            TextButton(
+              onPressed: _toggleBlock,
+              child: const Text(
+                "UNBLOCK",
+                style: TextStyle(
+                  color: Colors.green,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _inputUI() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(30),
+              ),
+              child: TextField(
+                controller: controller,
+                decoration: const InputDecoration(
+                  hintText: 'Type message',
+                  border: InputBorder.none,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          CircleAvatar(
+            backgroundColor: Colors.green,
+            child: IconButton(
+              icon: const Icon(Icons.send, color: Colors.white),
+              onPressed: _sendMessage,
+            ),
+          ),
+        ],
       ),
     );
   }

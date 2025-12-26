@@ -19,39 +19,65 @@ app.use('/api/auth', require('./routes/auth_routes'));
 app.use('/api/users', require('./routes/user_routes'));
 app.use('/api/messages', require('./routes/message_routes'));
 
-let onlineUsers = {}; // userId -> socketId
+// userId -> socketId
+let onlineUsers = {};
 
 io.on('connection', (socket) => {
-  console.log('🟢 Connected:', socket.id);
+  console.log('🟢 Socket connected:', socket.id);
 
+  // ---------------- USER ONLINE ----------------
   socket.on('user-online', (userId) => {
+    if (!userId) return;
+
+    // Ensure only one socket per user
     onlineUsers[userId] = socket.id;
+
     io.emit('online-users', Object.keys(onlineUsers));
   });
 
+  // ---------------- MESSAGE NOTIFY ----------------
   socket.on('send-message', (data) => {
-    const receiverSocket = onlineUsers[data.receiver_id];
+    if (!data || !data.receiver_id) return;
 
-    if (receiverSocket) {
-      io.to(receiverSocket).emit('receive-message', data);
+    const receiverSocketId = onlineUsers[data.receiver_id];
+
+    // Notify receiver only (do NOT store message here)
+    if (receiverSocketId) {
+      io.to(receiverSocketId).emit('receive-message', {
+        conversation_id: data.conversation_id,
+        sender_id: data.sender_id,
+        receiver_id: data.receiver_id,
+      });
     }
   });
 
+  // ---------------- DISCONNECT ----------------
   socket.on('disconnect', () => {
-    for (const [uid, sid] of Object.entries(onlineUsers)) {
-      if (sid === socket.id) delete onlineUsers[uid];
+    console.log('🔴 Socket disconnected:', socket.id);
+
+    // Remove disconnected socket from onlineUsers
+    for (const userId of Object.keys(onlineUsers)) {
+      if (onlineUsers[userId] === socket.id) {
+        delete onlineUsers[userId];
+        break;
+      }
     }
+
     io.emit('online-users', Object.keys(onlineUsers));
   });
 });
 
-
 const PORT = process.env.PORT || 5000;
 
 (async () => {
-  await connectDB();
-  await db.sequelize.sync({ alter: true });
-  server.listen(PORT, () =>
-    console.log(`🚀 Server running on port ${PORT}`)
-  );
+  try {
+    await connectDB();
+    await db.sequelize.sync({ alter: true });
+
+    server.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error('❌ Server failed to start:', err);
+  }
 })();

@@ -62,15 +62,9 @@ class _DashboardPageState extends State<DashboardPage>
       });
     });
 
-    socket.on('receive-message', (data) {
-      final senderId = data['sender_id'];
-
-      setState(() {
-        final index = users.indexWhere((u) => u['id'] == senderId);
-        if (index != -1) {
-          users[index]['unread'] = (users[index]['unread'] ?? 0) + 1;
-        }
-      });
+    // 🔔 Message notification → refresh from DB
+    socket.on('receive-message', (_) {
+      _fetchUsers(); // DB is source of truth
     });
   }
 
@@ -82,6 +76,8 @@ class _DashboardPageState extends State<DashboardPage>
 
     if (res.statusCode == 200) {
       final List data = jsonDecode(res.body);
+
+      if (!mounted) return;
 
       setState(() {
         users = data
@@ -124,7 +120,7 @@ class _DashboardPageState extends State<DashboardPage>
       backgroundColor: Colors.white,
       body: Column(
         children: [
-          // ---------------- HEADER (GREEN + STATUS BAR) ----------------
+          // ---------------- HEADER ----------------
           Container(
             padding: EdgeInsets.fromLTRB(16, statusBarHeight + 16, 16, 16),
             decoration: const BoxDecoration(
@@ -140,7 +136,7 @@ class _DashboardPageState extends State<DashboardPage>
                       backgroundImage: widget.profilePic != null
                           ? NetworkImage(widget.profilePic!)
                           : const AssetImage('images/default_user.png')
-                                as ImageProvider,
+                              as ImageProvider,
                     ),
                     const SizedBox(width: 12),
                     Column(
@@ -177,11 +173,14 @@ class _DashboardPageState extends State<DashboardPage>
             ),
           ),
 
-          // ---------------- LIST (WHITE) ----------------
+          // ---------------- LIST ----------------
           Expanded(
             child: TabBarView(
               controller: _tabController,
-              children: [_buildUserList(users), _buildUserList(onlineUsers)],
+              children: [
+                _buildUserList(users),
+                _buildUserList(onlineUsers),
+              ],
             ),
           ),
         ],
@@ -200,10 +199,14 @@ class _DashboardPageState extends State<DashboardPage>
 
         return ListTile(
           onTap: () async {
+            // ✅ Mark messages as read in DB
             await http.post(
               Uri.parse('http://10.0.2.2:5000/api/messages/read-all'),
               headers: {'Content-Type': 'application/json'},
-              body: jsonEncode({'sender_id': u['id'], 'receiver_id': myId}),
+              body: jsonEncode({
+                'sender_id': u['id'],
+                'receiver_id': myId,
+              }),
             );
 
             setState(() => u['unread'] = 0);
@@ -216,6 +219,7 @@ class _DashboardPageState extends State<DashboardPage>
               ),
             );
 
+            // 🔄 Refresh after coming back
             _fetchUsers();
           },
           leading: Stack(
@@ -227,7 +231,7 @@ class _DashboardPageState extends State<DashboardPage>
                         "http://10.0.2.2:5000/uploads/profile_pics/${u['profile_pic']}",
                       )
                     : const AssetImage('images/default_user.png')
-                          as ImageProvider,
+                        as ImageProvider,
               ),
               Positioned(
                 bottom: 0,

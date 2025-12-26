@@ -26,16 +26,19 @@ module.exports = (sequelize) => {
       },
 
       message: {
+        // For text messages
         type: DataTypes.TEXT,
         allowNull: true,
       },
 
       message_type: {
         type: DataTypes.ENUM('text', 'image', 'file'),
+        allowNull: false,
         defaultValue: 'text',
       },
 
       file_url: {
+        // For image/file messages
         type: DataTypes.STRING,
         allowNull: true,
       },
@@ -43,12 +46,28 @@ module.exports = (sequelize) => {
       status: {
         // sent → delivered → read
         type: DataTypes.ENUM('sent', 'delivered', 'read'),
+        allowNull: false,
         defaultValue: 'sent',
       },
     },
     {
       tableName: 'messages',
       timestamps: true,
+
+      indexes: [
+        {
+          name: 'idx_conversation_messages',
+          fields: ['conversation_id'],
+        },
+        {
+          name: 'idx_sender_receiver',
+          fields: ['sender_id', 'receiver_id'],
+        },
+        {
+          name: 'idx_message_status',
+          fields: ['status'],
+        },
+      ],
     }
   );
 

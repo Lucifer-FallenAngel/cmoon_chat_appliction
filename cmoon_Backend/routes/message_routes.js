@@ -1,5 +1,5 @@
 const express = require('express');
-const { Op, literal } = require('sequelize');
+const { Op } = require('sequelize');
 const db = require('../models');
 
 const router = express.Router();
@@ -9,157 +9,239 @@ const BlockedUser = db.BlockedUser;
 
 // ---------------- SEND MESSAGE ----------------
 router.post('/send', async (req, res) => {
-  const { sender_id, receiver_id, message } = req.body;
+  try {
+    const { sender_id, receiver_id, message } = req.body;
 
-  // 🚫 block check: prevent sending if either party has blocked the other
-  const blocked = await BlockedUser.findOne({
-    where: {
-      [Op.or]: [
-        { blocker_id: sender_id, blocked_id: receiver_id },
-        { blocker_id: receiver_id, blocked_id: sender_id },
-      ],
-    },
-  });
-
-  if (blocked) {
-    return res.status(403).json({ message: 'User is blocked' });
-  }
-
-  let convo = await Conversation.findOne({
-    where: {
-      [Op.or]: [
-        { user1_id: sender_id, user2_id: receiver_id },
-        { user1_id: receiver_id, user2_id: sender_id },
-      ],
-    },
-  });
-
-  if (!convo) {
-    convo = await Conversation.create({
-      user1_id: sender_id,
-      user2_id: receiver_id,
+    // 🚫 BLOCK CHECK
+    const blocked = await BlockedUser.findOne({
+      where: {
+        [Op.or]: [
+          { blocker_id: sender_id, blocked_id: receiver_id },
+          { blocker_id: receiver_id, blocked_id: sender_id },
+        ],
+      },
     });
+
+    if (blocked) {
+      return res.status(403).json({ message: 'User is blocked' });
+    }
+
+    // 🔎 FIND OR CREATE CONVERSATION
+    let convo = await Conversation.findOne({
+      where: {
+        [Op.or]: [
+          { user1_id: sender_id, user2_id: receiver_id },
+          { user1_id: receiver_id, user2_id: sender_id },
+        ],
+      },
+    });
+
+    if (!convo) {
+      convo = await Conversation.create({
+        user1_id: sender_id,
+        user2_id: receiver_id,
+      });
+    }
+
+    // 💾 STORE MESSAGE
+    const msg = await Message.create({
+      conversation_id: convo.id,
+      sender_id,
+      receiver_id,
+      message,
+      status: 'sent',
+      deleted_for: [],
+    });
+
+    res.json(msg);
+  } catch (err) {
+    console.error('SEND MESSAGE ERROR:', err);
+    res.sendStatus(500);
   }
-
-  const msg = await Message.create({
-    conversation_id: convo.id,
-    sender_id,
-    receiver_id,
-    message,
-    status: 'sent',
-    deleted_for: [], 
-  });
-
-  res.json(msg);
 });
 
 // ---------------- LOAD CHAT ----------------
 router.get('/:user1/:user2', async (req, res) => {
-  const user1 = parseInt(req.params.user1);
-  const user2 = parseInt(req.params.user2);
+  try {
+    const user1 = parseInt(req.params.user1);
+    const user2 = parseInt(req.params.user2);
 
-  const convo = await Conversation.findOne({
-    where: {
-      [Op.or]: [
-        { user1_id: user1, user2_id: user2 },
-        { user1_id: user2, user2_id: user1 },
-      ],
-    },
-  });
+    const convo = await Conversation.findOne({
+      where: {
+        [Op.or]: [
+          { user1_id: user1, user2_id: user2 },
+          { user1_id: user2, user2_id: user1 },
+        ],
+      },
+    });
 
-  if (!convo) return res.json([]);
+    if (!convo) return res.json([]);
 
-  const messages = await Message.findAll({
-    where: {
-      conversation_id: convo.id,
-      [Op.and]: [
-        // Only load messages NOT marked as deleted for this specific user
-        literal(`NOT JSON_CONTAINS(deleted_for, '${user1}')`),
-      ],
-    },
-    order: [['createdAt', 'ASC']],
-  });
+    // 📥 LOAD ALL MESSAGES
+    const allMessages = await Message.findAll({
+      where: { conversation_id: convo.id },
+      order: [['createdAt', 'ASC']],
+    });
 
-  res.json(messages);
+    // 🧹 FILTER "DELETE FOR ME" IN JS (SAFE)
+    const messages = allMessages.filter((m) => {
+      const deletedFor = m.deleted_for || [];
+      return !deletedFor.includes(user1);
+    });
+
+    // ✅ MARK AS DELIVERED
+    await Message.update(
+      { status: 'delivered' },
+      {
+        where: {
+          conversation_id: convo.id,
+          receiver_id: user1,
+          sender_id: user2,
+          status: 'sent',
+        },
+      }
+    );
+
+    res.json(messages);
+  } catch (err) {
+    console.error('LOAD CHAT ERROR:', err);
+    res.sendStatus(500);
+  }
+});
+
+// ---------------- MARK ALL AS READ ----------------
+router.post('/read-all', async (req, res) => {
+  try {
+    const { sender_id, receiver_id } = req.body;
+
+    await Message.update(
+      { status: 'read' },
+      {
+        where: {
+          sender_id,
+          receiver_id,
+          status: { [Op.ne]: 'read' },
+        },
+      }
+    );
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('READ ALL ERROR:', err);
+    res.sendStatus(500);
+  }
 });
 
 // ---------------- DELETE FOR ME ----------------
 router.post('/delete-for-me', async (req, res) => {
-  const { messageId, userId } = req.body;
+  try {
+    const { messageId, userId } = req.body;
 
-  const msg = await Message.findByPk(messageId);
-  if (!msg) return res.sendStatus(404);
+    const msg = await Message.findByPk(messageId);
+    if (!msg) return res.sendStatus(404);
 
-  let deletedFor = msg.deleted_for || [];
-  if (!deletedFor.includes(userId)) {
-    deletedFor.push(userId);
-  }
+    const deletedFor = msg.deleted_for || [];
 
-  // Use update to ensure JSON changes persist in the database
-  await msg.update({ deleted_for: deletedFor });
-
-  res.sendStatus(200);
-});
-
-// ---------------- CLEAR CHAT ----------------
-router.post('/clear-chat', async (req, res) => {
-  const { userId, otherUserId } = req.body;
-
-  const convo = await Conversation.findOne({
-    where: {
-      [Op.or]: [
-        { user1_id: userId, user2_id: otherUserId },
-        { user1_id: otherUserId, user2_id: userId },
-      ],
-    },
-  });
-
-  if (!convo) return res.sendStatus(200);
-
-  const messages = await Message.findAll({
-    where: { conversation_id: convo.id },
-  });
-
-  // Permanently mark every message in the conversation as deleted for this user
-  for (const msg of messages) {
-    let deletedFor = msg.deleted_for || [];
     if (!deletedFor.includes(userId)) {
       deletedFor.push(userId);
       await msg.update({ deleted_for: deletedFor });
     }
-  }
 
-  res.sendStatus(200);
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('DELETE FOR ME ERROR:', err);
+    res.sendStatus(500);
+  }
+});
+
+// ---------------- CLEAR CHAT ----------------
+router.post('/clear-chat', async (req, res) => {
+  try {
+    const { userId, otherUserId } = req.body;
+
+    const convo = await Conversation.findOne({
+      where: {
+        [Op.or]: [
+          { user1_id: userId, user2_id: otherUserId },
+          { user1_id: otherUserId, user2_id: userId },
+        ],
+      },
+    });
+
+    if (!convo) return res.sendStatus(200);
+
+    const messages = await Message.findAll({
+      where: { conversation_id: convo.id },
+    });
+
+    for (const msg of messages) {
+      const deletedFor = msg.deleted_for || [];
+      if (!deletedFor.includes(userId)) {
+        deletedFor.push(userId);
+        await msg.update({ deleted_for: deletedFor });
+      }
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('CLEAR CHAT ERROR:', err);
+    res.sendStatus(500);
+  }
 });
 
 // ---------------- BLOCK USER ----------------
 router.post('/block', async (req, res) => {
-  const { blocker_id, blocked_id } = req.body;
-  const exists = await BlockedUser.findOne({ where: { blocker_id, blocked_id } });
-  if (!exists) {
-    await BlockedUser.create({ blocker_id, blocked_id });
+  try {
+    const { blocker_id, blocked_id } = req.body;
+
+    const exists = await BlockedUser.findOne({
+      where: { blocker_id, blocked_id },
+    });
+
+    if (!exists) {
+      await BlockedUser.create({ blocker_id, blocked_id });
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('BLOCK USER ERROR:', err);
+    res.sendStatus(500);
   }
-  res.sendStatus(200);
 });
 
 // ---------------- UNBLOCK USER ----------------
 router.post('/unblock', async (req, res) => {
-  const { blocker_id, blocked_id } = req.body;
-  await BlockedUser.destroy({ where: { blocker_id, blocked_id } });
-  res.sendStatus(200);
+  try {
+    const { blocker_id, blocked_id } = req.body;
+    await BlockedUser.destroy({ where: { blocker_id, blocked_id } });
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('UNBLOCK USER ERROR:', err);
+    res.sendStatus(500);
+  }
 });
 
 // ---------------- CHECK BLOCK ----------------
 router.get('/is-blocked/:me/:other', async (req, res) => {
-  const { me, other } = req.params;
+  try {
+    const { me, other } = req.params;
 
-  const IBlockedThem = await BlockedUser.findOne({ where: { blocker_id: me, blocked_id: other } });
-  const TheyBlockedMe = await BlockedUser.findOne({ where: { blocker_id: other, blocked_id: me } });
+    const iBlocked = await BlockedUser.findOne({
+      where: { blocker_id: me, blocked_id: other },
+    });
 
-  res.json({ 
-    blocked: !!(IBlockedThem || TheyBlockedMe),
-    iBlocked: !!IBlockedThem 
-  });
+    const theyBlocked = await BlockedUser.findOne({
+      where: { blocker_id: other, blocked_id: me },
+    });
+
+    res.json({
+      blocked: !!(iBlocked || theyBlocked),
+      iBlocked: !!iBlocked,
+    });
+  } catch (err) {
+    console.error('CHECK BLOCK ERROR:', err);
+    res.sendStatus(500);
+  }
 });
 
 module.exports = router;
