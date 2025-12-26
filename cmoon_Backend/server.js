@@ -22,21 +22,28 @@ app.use('/api/auth', require('./routes/auth_routes'));
 app.use('/api/users', require('./routes/user_routes'));
 app.use('/api/messages', require('./routes/message_routes'));
 
-// userId -> socketId
-let onlineUsers = {};
+// ===============================
+// ONLINE USERS MAP
+// ===============================
+let onlineUsers = {}; // userId -> socketId
 
 io.on('connection', (socket) => {
   console.log('🟢 Socket connected:', socket.id);
 
-  // ================= USER ONLINE =================
+  // ==================================================
+  // USER ONLINE
+  // ==================================================
   socket.on('user-online', (userId) => {
     if (!userId) return;
 
     onlineUsers[userId] = socket.id;
+
     io.emit('online-users', Object.keys(onlineUsers));
   });
 
-  // ================= SEND MESSAGE NOTIFY =================
+  // ==================================================
+  // SEND MESSAGE (NOTIFY RECEIVER)
+  // ==================================================
   socket.on('send-message', (data) => {
     if (!data || !data.receiver_id) return;
 
@@ -51,7 +58,9 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ================= CHAT OPENED → DELIVERED =================
+  // ==================================================
+  // CHAT OPENED → MARK AS DELIVERED
+  // ==================================================
   socket.on('chat-opened', async ({ senderId, receiverId }) => {
     try {
       await Message.update(
@@ -78,7 +87,9 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ================= MESSAGE READ =================
+  // ==================================================
+  // MESSAGE READ
+  // ==================================================
   socket.on('message-read', async ({ senderId, receiverId }) => {
     try {
       await Message.update(
@@ -105,7 +116,24 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ================= DISCONNECT =================
+  // ==================================================
+  // DELETE FOR ME (SOCKET SYNC)
+  // ==================================================
+  socket.on('delete-for-me', ({ messageId, userId }) => {
+    if (!messageId || !userId) return;
+
+    // Only update UI for this user (not the other person)
+    const socketId = onlineUsers[userId];
+    if (socketId) {
+      io.to(socketId).emit('message-deleted-for-me', {
+        messageId,
+      });
+    }
+  });
+
+  // ==================================================
+  // DISCONNECT
+  // ==================================================
   socket.on('disconnect', () => {
     console.log('🔴 Socket disconnected:', socket.id);
 
@@ -120,6 +148,9 @@ io.on('connection', (socket) => {
   });
 });
 
+// ==================================================
+// SERVER START
+// ==================================================
 const PORT = process.env.PORT || 5000;
 
 (async () => {

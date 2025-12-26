@@ -3,16 +3,19 @@ const { Op } = require('sequelize');
 const db = require('../models');
 
 const router = express.Router();
+
 const Message = db.Message;
 const Conversation = db.Conversation;
 const BlockedUser = db.BlockedUser;
 
-// ---------------- SEND MESSAGE ----------------
+/* ============================================================
+   SEND MESSAGE
+============================================================ */
 router.post('/send', async (req, res) => {
   try {
     const { sender_id, receiver_id, message } = req.body;
 
-    // 🚫 BLOCK CHECK
+    // 🚫 CHECK BLOCK
     const blocked = await BlockedUser.findOne({
       where: {
         [Op.or]: [
@@ -43,7 +46,7 @@ router.post('/send', async (req, res) => {
       });
     }
 
-    // 💾 STORE MESSAGE
+    // 💾 CREATE MESSAGE
     const msg = await Message.create({
       conversation_id: convo.id,
       sender_id,
@@ -60,7 +63,9 @@ router.post('/send', async (req, res) => {
   }
 });
 
-// ---------------- LOAD CHAT ----------------
+/* ============================================================
+   LOAD CHAT (FILTER "DELETE FOR ME")
+============================================================ */
 router.get('/:user1/:user2', async (req, res) => {
   try {
     const user1 = parseInt(req.params.user1);
@@ -77,39 +82,42 @@ router.get('/:user1/:user2', async (req, res) => {
 
     if (!convo) return res.json([]);
 
-    // 📥 LOAD ALL MESSAGES
     const allMessages = await Message.findAll({
       where: { conversation_id: convo.id },
       order: [['createdAt', 'ASC']],
     });
 
-    // 🧹 FILTER "DELETE FOR ME" IN JS (SAFE)
-    const messages = allMessages.filter((m) => {
-      const deletedFor = m.deleted_for || [];
+    // ✅ FILTER MESSAGES DELETED FOR CURRENT USER
+    const visibleMessages = allMessages.filter((msg) => {
+      const deletedFor = Array.isArray(msg.deleted_for)
+        ? msg.deleted_for
+        : [];
       return !deletedFor.includes(user1);
     });
 
-    // ✅ MARK AS DELIVERED
+    // ✅ UPDATE DELIVERY STATUS
     await Message.update(
       { status: 'delivered' },
       {
         where: {
           conversation_id: convo.id,
-          receiver_id: user1,
           sender_id: user2,
+          receiver_id: user1,
           status: 'sent',
         },
       }
     );
 
-    res.json(messages);
+    res.json(visibleMessages);
   } catch (err) {
     console.error('LOAD CHAT ERROR:', err);
     res.sendStatus(500);
   }
 });
 
-// ---------------- MARK ALL AS READ ----------------
+/* ============================================================
+   MARK ALL AS READ
+============================================================ */
 router.post('/read-all', async (req, res) => {
   try {
     const { sender_id, receiver_id } = req.body;
@@ -132,15 +140,23 @@ router.post('/read-all', async (req, res) => {
   }
 });
 
-// ---------------- DELETE FOR ME ----------------
+/* ============================================================
+   DELETE FOR ME (WHATSAPP STYLE)
+============================================================ */
 router.post('/delete-for-me', async (req, res) => {
   try {
     const { messageId, userId } = req.body;
 
+    if (!messageId || !userId) {
+      return res.status(400).json({ message: 'Missing parameters' });
+    }
+
     const msg = await Message.findByPk(messageId);
     if (!msg) return res.sendStatus(404);
 
-    const deletedFor = msg.deleted_for || [];
+    const deletedFor = Array.isArray(msg.deleted_for)
+      ? msg.deleted_for
+      : [];
 
     if (!deletedFor.includes(userId)) {
       deletedFor.push(userId);
@@ -154,7 +170,9 @@ router.post('/delete-for-me', async (req, res) => {
   }
 });
 
-// ---------------- CLEAR CHAT ----------------
+/* ============================================================
+   CLEAR CHAT (DELETE ALL FOR USER)
+============================================================ */
 router.post('/clear-chat', async (req, res) => {
   try {
     const { userId, otherUserId } = req.body;
@@ -175,7 +193,10 @@ router.post('/clear-chat', async (req, res) => {
     });
 
     for (const msg of messages) {
-      const deletedFor = msg.deleted_for || [];
+      const deletedFor = Array.isArray(msg.deleted_for)
+        ? msg.deleted_for
+        : [];
+
       if (!deletedFor.includes(userId)) {
         deletedFor.push(userId);
         await msg.update({ deleted_for: deletedFor });
@@ -189,7 +210,9 @@ router.post('/clear-chat', async (req, res) => {
   }
 });
 
-// ---------------- BLOCK USER ----------------
+/* ============================================================
+   BLOCK USER
+============================================================ */
 router.post('/block', async (req, res) => {
   try {
     const { blocker_id, blocked_id } = req.body;
@@ -209,11 +232,17 @@ router.post('/block', async (req, res) => {
   }
 });
 
-// ---------------- UNBLOCK USER ----------------
+/* ============================================================
+   UNBLOCK USER
+============================================================ */
 router.post('/unblock', async (req, res) => {
   try {
     const { blocker_id, blocked_id } = req.body;
-    await BlockedUser.destroy({ where: { blocker_id, blocked_id } });
+
+    await BlockedUser.destroy({
+      where: { blocker_id, blocked_id },
+    });
+
     res.sendStatus(200);
   } catch (err) {
     console.error('UNBLOCK USER ERROR:', err);
@@ -221,7 +250,9 @@ router.post('/unblock', async (req, res) => {
   }
 });
 
-// ---------------- CHECK BLOCK ----------------
+/* ============================================================
+   CHECK BLOCK STATUS
+============================================================ */
 router.get('/is-blocked/:me/:other', async (req, res) => {
   try {
     const { me, other } = req.params;

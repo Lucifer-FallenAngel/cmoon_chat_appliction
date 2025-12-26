@@ -26,7 +26,6 @@ module.exports = (sequelize) => {
       },
 
       message: {
-        // For text messages
         type: DataTypes.TEXT,
         allowNull: true,
       },
@@ -38,16 +37,21 @@ module.exports = (sequelize) => {
       },
 
       file_url: {
-        // For image/file messages
         type: DataTypes.STRING,
         allowNull: true,
       },
 
       status: {
-        // sent → delivered → read
         type: DataTypes.ENUM('sent', 'delivered', 'read'),
         allowNull: false,
         defaultValue: 'sent',
+      },
+
+      // ✅ NEW FIELD — used for "Delete for Me"
+      deleted_for: {
+        type: DataTypes.JSON,
+        allowNull: false,
+        defaultValue: [],
       },
     },
     {

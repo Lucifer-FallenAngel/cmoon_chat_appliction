@@ -41,7 +41,19 @@ class _ChatPageState extends State<ChatPage> {
     });
   }
 
-  // ---------------- DATE & TIME HELPERS ----------------
+  void _scrollBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (scrollController.hasClients) {
+        scrollController.animateTo(
+          scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  // ================= DATE HELPERS =================
   String formatTime(String iso) {
     final dt = DateTime.parse(iso).toLocal();
     return DateFormat('hh:mm a').format(dt);
@@ -58,7 +70,7 @@ class _ChatPageState extends State<ChatPage> {
     return DateFormat('d MMMM yyyy').format(date);
   }
 
-  // ---------------- BLOCK CHECK ----------------
+  // ================= BLOCK CHECK =================
   Future<void> _checkBlocked() async {
     final res = await http.get(
       Uri.parse(
@@ -75,7 +87,7 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  // ---------------- LOAD MESSAGES ----------------
+  // ================= LOAD MESSAGES =================
   Future<void> _loadMessages() async {
     final res = await http.get(
       Uri.parse(
@@ -99,16 +111,25 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  // ---------------- SOCKET ----------------
+  // ================= SOCKET EVENTS =================
   void _setupSocket() {
     widget.socket.off('receive-message');
     widget.socket.off('message-status-update');
+    widget.socket.off('message-deleted-for-me');
 
     widget.socket.on('receive-message', (_) => _loadMessages());
     widget.socket.on('message-status-update', (_) => _loadMessages());
+
+    // DELETE FOR ME (REALTIME)
+    widget.socket.on('message-deleted-for-me', (data) {
+      final id = data['messageId'];
+      setState(() {
+        messages.removeWhere((m) => m['id'] == id);
+      });
+    });
   }
 
-  // ---------------- SEND MESSAGE ----------------
+  // ================= SEND MESSAGE =================
   Future<void> _sendMessage() async {
     if (controller.text.trim().isEmpty || isBlocked) return;
 
@@ -134,20 +155,51 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  // ---------------- SCROLL FIX ----------------
-  void _scrollBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (scrollController.hasClients) {
-        scrollController.animateTo(
-          scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
-      }
+  // ================= DELETE FOR ME =================
+  Future<void> _deleteForMe(int messageId) async {
+    await http.post(
+      Uri.parse('http://10.0.2.2:5000/api/messages/delete-for-me'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'messageId': messageId, 'userId': widget.myId}),
+    );
+
+    setState(() {
+      messages.removeWhere((m) => m['id'] == messageId);
+    });
+
+    widget.socket.emit('delete-for-me', {
+      'messageId': messageId,
+      'userId': widget.myId,
     });
   }
 
-  // ---------------- TICKS ----------------
+  // ================= DELETE POPUP =================
+  void _showDeleteDialog(int messageId) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text("Delete Message"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel"),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _deleteForMe(messageId);
+            },
+            child: const Text(
+              "Delete for me",
+              style: TextStyle(color: Colors.green),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ================= MESSAGE STATUS ICON =================
   Widget _statusTick(String status) {
     IconData icon = Icons.check;
     Color color = Colors.grey;
@@ -161,7 +213,7 @@ class _ChatPageState extends State<ChatPage> {
     return Icon(icon, size: 16, color: color);
   }
 
-  // ---------------- UI ----------------
+  // ================= UI =================
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -214,38 +266,43 @@ class _ChatPageState extends State<ChatPage> {
                         ),
                       ),
 
-                    Align(
-                      alignment: isMe
-                          ? Alignment.centerRight
-                          : Alignment.centerLeft,
-                      child: Container(
-                        constraints: const BoxConstraints(maxWidth: 280),
-                        padding: const EdgeInsets.all(10),
-                        margin: const EdgeInsets.symmetric(vertical: 4),
-                        decoration: BoxDecoration(
-                          color: isMe ? const Color(0xFFDCF8C6) : Colors.white,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Text(m['message']),
-                            const SizedBox(height: 4),
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  formatTime(m['createdAt']),
-                                  style: const TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.grey,
+                    GestureDetector(
+                      onLongPress: () => _showDeleteDialog(m['id']),
+                      child: Align(
+                        alignment: isMe
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        child: Container(
+                          constraints: const BoxConstraints(maxWidth: 280),
+                          padding: const EdgeInsets.all(10),
+                          margin: const EdgeInsets.symmetric(vertical: 4),
+                          decoration: BoxDecoration(
+                            color: isMe
+                                ? const Color(0xFFDCF8C6)
+                                : Colors.white,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            children: [
+                              Text(m['message']),
+                              const SizedBox(height: 4),
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    formatTime(m['createdAt']),
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey,
+                                    ),
                                   ),
-                                ),
-                                const SizedBox(width: 4),
-                                if (isMe) _statusTick(m['status']),
-                              ],
-                            ),
-                          ],
+                                  const SizedBox(width: 4),
+                                  if (isMe) _statusTick(m['status']),
+                                ],
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
