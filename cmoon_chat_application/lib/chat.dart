@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:socket_io_client/socket_io_client.dart' as IO;
+import 'package:intl/intl.dart';
 
 class ChatPage extends StatefulWidget {
   final int myId;
@@ -33,6 +34,28 @@ class _ChatPageState extends State<ChatPage> {
     _checkBlocked();
     _loadMessages();
     _setupSocket();
+
+    widget.socket.emit('chat-opened', {
+      'senderId': widget.otherUser['id'],
+      'receiverId': widget.myId,
+    });
+  }
+
+  // ---------------- DATE & TIME HELPERS ----------------
+  String formatTime(String iso) {
+    final dt = DateTime.parse(iso).toLocal();
+    return DateFormat('hh:mm a').format(dt);
+  }
+
+  String formatDateLabel(DateTime date) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final msgDate = DateTime(date.year, date.month, date.day);
+
+    if (msgDate == today) return "Today";
+    if (msgDate == yesterday) return "Yesterday";
+    return DateFormat('d MMMM yyyy').format(date);
   }
 
   // ---------------- BLOCK CHECK ----------------
@@ -43,10 +66,8 @@ class _ChatPageState extends State<ChatPage> {
       ),
     );
 
-    if (res.statusCode == 200) {
+    if (res.statusCode == 200 && mounted) {
       final data = jsonDecode(res.body);
-      if (!mounted) return;
-
       setState(() {
         isBlocked = data['blocked'];
         iAmTheBlocker = data['iBlocked'];
@@ -54,7 +75,7 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  // ---------------- LOAD MESSAGES (DB SOURCE OF TRUTH) ----------------
+  // ---------------- LOAD MESSAGES ----------------
   Future<void> _loadMessages() async {
     final res = await http.get(
       Uri.parse(
@@ -62,9 +83,7 @@ class _ChatPageState extends State<ChatPage> {
       ),
     );
 
-    if (res.statusCode == 200) {
-      if (!mounted) return;
-
+    if (res.statusCode == 200 && mounted) {
       setState(() {
         messages
           ..clear()
@@ -72,20 +91,21 @@ class _ChatPageState extends State<ChatPage> {
       });
 
       _scrollBottom();
+
+      widget.socket.emit('message-read', {
+        'senderId': widget.otherUser['id'],
+        'receiverId': widget.myId,
+      });
     }
   }
 
-  // ---------------- SOCKET (NOTIFY ONLY) ----------------
+  // ---------------- SOCKET ----------------
   void _setupSocket() {
     widget.socket.off('receive-message');
+    widget.socket.off('message-status-update');
 
-    widget.socket.on('receive-message', (data) {
-      // Reload ONLY if this chat is affected
-      if (data['sender_id'] == widget.otherUser['id'] ||
-          data['receiver_id'] == widget.otherUser['id']) {
-        _loadMessages();
-      }
-    });
+    widget.socket.on('receive-message', (_) => _loadMessages());
+    widget.socket.on('message-status-update', (_) => _loadMessages());
   }
 
   // ---------------- SEND MESSAGE ----------------
@@ -106,10 +126,7 @@ class _ChatPageState extends State<ChatPage> {
     );
 
     if (res.statusCode == 200) {
-      // Reload from DB to avoid duplicates / missing messages
       await _loadMessages();
-
-      // Notify receiver only
       widget.socket.emit('send-message', {
         'sender_id': widget.myId,
         'receiver_id': widget.otherUser['id'],
@@ -117,53 +134,31 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  // ---------------- DELETE FOR ME ----------------
-  Future<void> _deleteForMe(int messageId) async {
-    await http.post(
-      Uri.parse('http://10.0.2.2:5000/api/messages/delete-for-me'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'messageId': messageId, 'userId': widget.myId}),
-    );
-
-    await _loadMessages();
-  }
-
-  // ---------------- CLEAR CHAT ----------------
-  Future<void> _clearChat() async {
-    await http.post(
-      Uri.parse('http://10.0.2.2:5000/api/messages/clear-chat'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'userId': widget.myId,
-        'otherUserId': widget.otherUser['id'],
-      }),
-    );
-
-    setState(() => messages.clear());
-  }
-
-  // ---------------- BLOCK / UNBLOCK ----------------
-  Future<void> _toggleBlock() async {
-    final endpoint = iAmTheBlocker ? 'unblock' : 'block';
-
-    await http.post(
-      Uri.parse('http://10.0.2.2:5000/api/messages/$endpoint'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'blocker_id': widget.myId,
-        'blocked_id': widget.otherUser['id'],
-      }),
-    );
-
-    await _checkBlocked();
-  }
-
+  // ---------------- SCROLL FIX ----------------
   void _scrollBottom() {
-    Future.delayed(const Duration(milliseconds: 100), () {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       if (scrollController.hasClients) {
-        scrollController.jumpTo(scrollController.position.maxScrollExtent);
+        scrollController.animateTo(
+          scrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
       }
     });
+  }
+
+  // ---------------- TICKS ----------------
+  Widget _statusTick(String status) {
+    IconData icon = Icons.check;
+    Color color = Colors.grey;
+
+    if (status == 'delivered') icon = Icons.done_all;
+    if (status == 'read') {
+      icon = Icons.done_all;
+      color = Colors.blue;
+    }
+
+    return Icon(icon, size: 16, color: color);
   }
 
   // ---------------- UI ----------------
@@ -172,231 +167,114 @@ class _ChatPageState extends State<ChatPage> {
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Colors.green,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.pop(context),
-        ),
         title: Text(widget.otherUser['name']),
-        actions: [
-          PopupMenuButton<String>(
-            onSelected: (v) {
-              if (v == 'clear') _confirmClear();
-              if (v == 'block') _confirmBlock();
-            },
-            itemBuilder: (_) => [
-              PopupMenuItem(
-                value: 'block',
-                child: Text(
-                  iAmTheBlocker ? 'Unblock Contact' : 'Block Contact',
-                ),
-              ),
-              const PopupMenuItem(value: 'clear', child: Text('Clear Chat')),
-            ],
-          ),
-        ],
       ),
-      body: Container(
-        decoration: const BoxDecoration(
-          image: DecorationImage(
-            image: AssetImage('images/chat_bg.png'),
-            fit: BoxFit.cover,
-          ),
-        ),
-        child: Column(
-          children: [
-            Expanded(
-              child: ListView.builder(
-                controller: scrollController,
-                padding: const EdgeInsets.all(10),
-                itemCount: messages.length,
-                itemBuilder: (_, i) {
-                  final m = messages[i];
-                  final isMe = m['sender_id'] == widget.myId;
+      body: Column(
+        children: [
+          Expanded(
+            child: ListView.builder(
+              controller: scrollController,
+              padding: const EdgeInsets.all(10),
+              itemCount: messages.length,
+              itemBuilder: (_, i) {
+                final m = messages[i];
+                final isMe = m['sender_id'] == widget.myId;
+                final msgTime = DateTime.parse(m['createdAt']).toLocal();
 
-                  return GestureDetector(
-                    onLongPress: () => _confirmDelete(m['id']),
-                    child: Align(
+                bool showDateHeader =
+                    i == 0 ||
+                    DateTime.parse(
+                          messages[i - 1]['createdAt'],
+                        ).toLocal().day !=
+                        msgTime.day;
+
+                return Column(
+                  children: [
+                    if (showDateHeader)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade300,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Text(
+                              formatDateLabel(msgTime),
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+
+                    Align(
                       alignment: isMe
                           ? Alignment.centerRight
                           : Alignment.centerLeft,
                       child: Container(
                         constraints: const BoxConstraints(maxWidth: 280),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 10,
-                        ),
-                        margin: const EdgeInsets.symmetric(
-                          vertical: 4,
-                          horizontal: 6,
-                        ),
+                        padding: const EdgeInsets.all(10),
+                        margin: const EdgeInsets.symmetric(vertical: 4),
                         decoration: BoxDecoration(
                           color: isMe ? const Color(0xFFDCF8C6) : Colors.white,
-                          borderRadius: BorderRadius.only(
-                            topLeft: const Radius.circular(12),
-                            topRight: const Radius.circular(12),
-                            bottomLeft: Radius.circular(isMe ? 12 : 0),
-                            bottomRight: Radius.circular(isMe ? 0 : 12),
-                          ),
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                        child: Text(
-                          m['message'],
-                          style: const TextStyle(fontSize: 15),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(m['message']),
+                            const SizedBox(height: 4),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  formatTime(m['createdAt']),
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.grey,
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                if (isMe) _statusTick(m['status']),
+                              ],
+                            ),
+                          ],
                         ),
                       ),
                     ),
-                  );
-                },
-              ),
-            ),
-
-            if (isBlocked) _blockedUI() else _inputUI(),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _blockedUI() {
-    return Container(
-      margin: const EdgeInsets.all(12),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.9),
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Column(
-        children: [
-          Text(
-            iAmTheBlocker
-                ? "You have blocked this contact."
-                : "You cannot reply to this conversation.",
-            style: const TextStyle(color: Colors.grey),
-          ),
-          if (iAmTheBlocker)
-            TextButton(
-              onPressed: _toggleBlock,
-              child: const Text(
-                "UNBLOCK",
-                style: TextStyle(
-                  color: Colors.green,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _inputUI() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 6, 8, 10),
-      child: Row(
-        children: [
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(30),
-              ),
-              child: TextField(
-                controller: controller,
-                decoration: const InputDecoration(
-                  hintText: 'Type message',
-                  border: InputBorder.none,
-                ),
-              ),
+                  ],
+                );
+              },
             ),
           ),
-          const SizedBox(width: 8),
-          CircleAvatar(
-            backgroundColor: Colors.green,
-            child: IconButton(
-              icon: const Icon(Icons.send, color: Colors.white),
-              onPressed: _sendMessage,
+
+          if (!isBlocked)
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: controller,
+                      decoration: const InputDecoration(
+                        hintText: 'Type message',
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.send, color: Colors.green),
+                    onPressed: _sendMessage,
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ---------------- CONFIRM DIALOGS ----------------
-  void _confirmDelete(int messageId) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Delete Message'),
-        content: const Text(
-          'This message will be deleted for you permanently.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _deleteForMe(messageId);
-            },
-            child: const Text('Delete for me'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _confirmClear() {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Clear Chat?'),
-        content: const Text(
-          'Are you sure you want to clear messages in this chat? This won\'t delete them for the other user.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('No'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _clearChat();
-            },
-            child: const Text('Yes'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _confirmBlock() {
-    final title = iAmTheBlocker ? 'Unblock Contact?' : 'Block Contact?';
-    final content = iAmTheBlocker
-        ? 'You will be able to send and receive messages again.'
-        : 'Blocked contacts cannot call you or send you messages.';
-
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text(title),
-        content: Text(content),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('No'),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _toggleBlock();
-            },
-            child: const Text('Yes'),
-          ),
         ],
       ),
     );

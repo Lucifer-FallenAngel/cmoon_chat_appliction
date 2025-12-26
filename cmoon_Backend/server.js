@@ -2,8 +2,11 @@ const express = require('express');
 require('dotenv').config();
 const http = require('http');
 const { Server } = require('socket.io');
+const { Op } = require('sequelize');
+
 const { connectDB } = require('./config/db');
 const db = require('./models');
+const Message = db.Message;
 
 const app = express();
 const server = http.createServer(app);
@@ -25,23 +28,20 @@ let onlineUsers = {};
 io.on('connection', (socket) => {
   console.log('🟢 Socket connected:', socket.id);
 
-  // ---------------- USER ONLINE ----------------
+  // ================= USER ONLINE =================
   socket.on('user-online', (userId) => {
     if (!userId) return;
 
-    // Ensure only one socket per user
     onlineUsers[userId] = socket.id;
-
     io.emit('online-users', Object.keys(onlineUsers));
   });
 
-  // ---------------- MESSAGE NOTIFY ----------------
+  // ================= SEND MESSAGE NOTIFY =================
   socket.on('send-message', (data) => {
     if (!data || !data.receiver_id) return;
 
     const receiverSocketId = onlineUsers[data.receiver_id];
 
-    // Notify receiver only (do NOT store message here)
     if (receiverSocketId) {
       io.to(receiverSocketId).emit('receive-message', {
         conversation_id: data.conversation_id,
@@ -51,11 +51,64 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ---------------- DISCONNECT ----------------
+  // ================= CHAT OPENED → DELIVERED =================
+  socket.on('chat-opened', async ({ senderId, receiverId }) => {
+    try {
+      await Message.update(
+        { status: 'delivered' },
+        {
+          where: {
+            sender_id: senderId,
+            receiver_id: receiverId,
+            status: 'sent',
+          },
+        }
+      );
+
+      const senderSocketId = onlineUsers[senderId];
+      if (senderSocketId) {
+        io.to(senderSocketId).emit('message-status-update', {
+          senderId,
+          receiverId,
+          status: 'delivered',
+        });
+      }
+    } catch (err) {
+      console.error('❌ Delivered update error:', err);
+    }
+  });
+
+  // ================= MESSAGE READ =================
+  socket.on('message-read', async ({ senderId, receiverId }) => {
+    try {
+      await Message.update(
+        { status: 'read' },
+        {
+          where: {
+            sender_id: senderId,
+            receiver_id: receiverId,
+            status: { [Op.ne]: 'read' },
+          },
+        }
+      );
+
+      const senderSocketId = onlineUsers[senderId];
+      if (senderSocketId) {
+        io.to(senderSocketId).emit('message-status-update', {
+          senderId,
+          receiverId,
+          status: 'read',
+        });
+      }
+    } catch (err) {
+      console.error('❌ Read update error:', err);
+    }
+  });
+
+  // ================= DISCONNECT =================
   socket.on('disconnect', () => {
     console.log('🔴 Socket disconnected:', socket.id);
 
-    // Remove disconnected socket from onlineUsers
     for (const userId of Object.keys(onlineUsers)) {
       if (onlineUsers[userId] === socket.id) {
         delete onlineUsers[userId];
