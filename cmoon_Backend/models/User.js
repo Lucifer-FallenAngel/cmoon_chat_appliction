@@ -11,24 +11,24 @@ module.exports = (sequelize) => {
       },
 
       name: {
-        type: DataTypes.STRING,
+        type: DataTypes.STRING(100),
         allowNull: false,
       },
 
       mobile: {
-        type: DataTypes.STRING,
+        type: DataTypes.STRING(20),
         allowNull: false,
         unique: true,
       },
 
       email: {
-        type: DataTypes.STRING,
+        type: DataTypes.STRING(150),
         allowNull: false,
         unique: true,
       },
 
       gender: {
-        type: DataTypes.STRING,
+        type: DataTypes.STRING(10),
         allowNull: false,
       },
 
@@ -44,6 +44,12 @@ module.exports = (sequelize) => {
 
       last_seen: {
         type: DataTypes.DATE,
+        allowNull: true,
+      },
+
+      // NEW FIELD FOR ONESIGNAL PUSH NOTIFICATIONS
+      onesignal_player_id: {
+        type: DataTypes.STRING,
         allowNull: true,
       },
     },

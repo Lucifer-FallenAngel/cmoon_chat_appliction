@@ -120,4 +120,28 @@ router.post(
   }
 );
 
+// NEW ENDPOINT: Save OneSignal Player ID from Flutter after login
+router.post('/update-onesignal', async (req, res) => {
+  const { userId, playerId } = req.body;
+
+  if (!userId || !playerId) {
+    return res.status(400).json({ message: 'Missing userId or playerId' });
+  }
+
+  try {
+    const user = await User.findByPk(userId);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    user.onesignal_player_id = playerId;
+    await user.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('UPDATE ONESIGNAL ERROR:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 module.exports = router;

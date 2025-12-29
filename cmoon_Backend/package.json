@@ -16,6 +16,7 @@
     "express": "^5.2.1",
     "multer": "^2.0.2",
     "mysql2": "^3.16.0",
+    "onesignal-node": "^3.4.0",
     "sequelize": "^6.37.7",
     "socket.io": "^4.8.3"
   },

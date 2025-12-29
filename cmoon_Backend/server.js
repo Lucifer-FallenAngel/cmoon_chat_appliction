@@ -3,67 +3,83 @@ require('dotenv').config();
 const http = require('http');
 const { Server } = require('socket.io');
 const { Op } = require('sequelize');
+const OneSignal = require('onesignal-node'); // NEW: for push notifications
 
 const { connectDB } = require('./config/db');
 const db = require('./models');
+
 const Message = db.Message;
 
 const app = express();
 const server = http.createServer(app);
 
+/* ============================================================
+   SOCKET.IO SETUP
+============================================================ */
 const io = new Server(server, {
   cors: { origin: '*' },
 });
 
+/* ============================================================
+   ONESIGNAL PUSH NOTIFICATION CLIENT (NEW)
+============================================================ */
+const onesignalClient = new OneSignal.Client(
+  process.env.ONESIGNAL_APP_ID,    // Add these to your .env
+  process.env.ONESIGNAL_API_KEY
+);
+app.set('onesignalClient', onesignalClient); // Make available in routes
+
+/* ============================================================
+   ONLINE USERS MAP (userId → socketId)
+============================================================ */
+const onlineUsers = {};
+
+// Make io & onlineUsers available in routes/middleware
+app.set('io', io);
+app.set('onlineUsers', onlineUsers);
+
+/* ============================================================
+   MIDDLEWARE
+============================================================ */
 app.use(express.json());
 app.use('/uploads', express.static('uploads'));
 
+/* ============================================================
+   ROUTES
+============================================================ */
 app.use('/api/auth', require('./routes/auth_routes'));
 app.use('/api/users', require('./routes/user_routes'));
 app.use('/api/messages', require('./routes/message_routes'));
 
-// ===============================
-// ONLINE USERS MAP
-// ===============================
-let onlineUsers = {}; // userId -> socketId
-
+/* ============================================================
+   SOCKET EVENTS
+============================================================ */
 io.on('connection', (socket) => {
-  console.log('🟢 Socket connected:', socket.id);
+  console.log('🟢 New connection:', socket.id);
 
-  // ==================================================
-  // USER ONLINE
-  // ==================================================
   socket.on('user-online', (userId) => {
     if (!userId) return;
 
     onlineUsers[userId] = socket.id;
-
-    io.emit('online-users', Object.keys(onlineUsers));
+    io.emit('online-users-updated', Object.keys(onlineUsers));
+    console.log(`User ${userId} is now online`);
   });
 
-  // ==================================================
-  // SEND MESSAGE (NOTIFY RECEIVER)
-  // ==================================================
-  socket.on('send-message', (data) => {
-    if (!data || !data.receiver_id) return;
+  socket.on('send-message', ({ sender_id, receiver_id }) => {
+    if (!receiver_id) return;
 
-    const receiverSocketId = onlineUsers[data.receiver_id];
-
-    if (receiverSocketId) {
-      io.to(receiverSocketId).emit('receive-message', {
-        conversation_id: data.conversation_id,
-        sender_id: data.sender_id,
-        receiver_id: data.receiver_id,
+    const receiverSocket = onlineUsers[receiver_id];
+    if (receiverSocket) {
+      io.to(receiverSocket).emit('new-message-arrived', {
+        sender_id,
+        receiver_id,
       });
     }
   });
 
-  // ==================================================
-  // CHAT OPENED → MARK AS DELIVERED
-  // ==================================================
   socket.on('chat-opened', async ({ senderId, receiverId }) => {
     try {
-      await Message.update(
+      const [updatedCount] = await Message.update(
         { status: 'delivered' },
         {
           where: {
@@ -74,25 +90,25 @@ io.on('connection', (socket) => {
         }
       );
 
-      const senderSocketId = onlineUsers[senderId];
-      if (senderSocketId) {
-        io.to(senderSocketId).emit('message-status-update', {
-          senderId,
-          receiverId,
-          status: 'delivered',
-        });
+      if (updatedCount > 0) {
+        const senderSocket = onlineUsers[senderId];
+        if (senderSocket) {
+          io.to(senderSocket).emit('messages-delivered', {
+            senderId,
+            receiverId,
+            status: 'delivered',
+          });
+        }
+        console.log(`Marked ${updatedCount} messages as delivered`);
       }
     } catch (err) {
-      console.error('❌ Delivered update error:', err);
+      console.error('❌ Error marking messages as delivered:', err);
     }
   });
 
-  // ==================================================
-  // MESSAGE READ
-  // ==================================================
-  socket.on('message-read', async ({ senderId, receiverId }) => {
+  socket.on('messages-read', async ({ senderId, receiverId }) => {
     try {
-      await Message.update(
+      const [updatedCount] = await Message.update(
         { status: 'read' },
         {
           where: {
@@ -103,65 +119,64 @@ io.on('connection', (socket) => {
         }
       );
 
-      const senderSocketId = onlineUsers[senderId];
-      if (senderSocketId) {
-        io.to(senderSocketId).emit('message-status-update', {
-          senderId,
-          receiverId,
-          status: 'read',
-        });
+      if (updatedCount > 0) {
+        const senderSocket = onlineUsers[senderId];
+        if (senderSocket) {
+          io.to(senderSocket).emit('messages-read-by-recipient', {
+            senderId,
+            receiverId,
+            status: 'read',
+          });
+        }
+        console.log(`Marked ${updatedCount} messages as READ by ${receiverId}`);
       }
     } catch (err) {
-      console.error('❌ Read update error:', err);
+      console.error('❌ Error marking messages as read:', err);
     }
   });
 
-  // ==================================================
-  // DELETE FOR ME (SOCKET SYNC)
-  // ==================================================
   socket.on('delete-for-me', ({ messageId, userId }) => {
-    if (!messageId || !userId) return;
-
-    // Only update UI for this user (not the other person)
     const socketId = onlineUsers[userId];
     if (socketId) {
-      io.to(socketId).emit('message-deleted-for-me', {
-        messageId,
-      });
+      io.to(socketId).emit('message-deleted-for-me', { messageId, userId });
     }
   });
 
-  // ==================================================
-  // DISCONNECT
-  // ==================================================
   socket.on('disconnect', () => {
-    console.log('🔴 Socket disconnected:', socket.id);
+    console.log('🔴 Disconnected:', socket.id);
 
-    for (const userId of Object.keys(onlineUsers)) {
-      if (onlineUsers[userId] === socket.id) {
-        delete onlineUsers[userId];
+    let disconnectedUserId = null;
+    for (const uid in onlineUsers) {
+      if (onlineUsers[uid] === socket.id) {
+        disconnectedUserId = uid;
+        delete onlineUsers[uid];
         break;
       }
     }
 
-    io.emit('online-users', Object.keys(onlineUsers));
+    if (disconnectedUserId) {
+      io.emit('online-users-updated', Object.keys(onlineUsers));
+      console.log(`User ${disconnectedUserId} went offline`);
+    }
   });
 });
 
-// ==================================================
-// SERVER START
-// ==================================================
+/* ============================================================
+   START SERVER
+============================================================ */
 const PORT = process.env.PORT || 5000;
 
 (async () => {
   try {
     await connectDB();
-    await db.sequelize.sync({ alter: true });
+
+    await db.sequelize.sync({ force: false });
 
     server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
     });
   } catch (err) {
-    console.error('❌ Server failed to start:', err);
+    console.error('❌ Failed to start server:', err);
+    process.exit(1);
   }
 })();
