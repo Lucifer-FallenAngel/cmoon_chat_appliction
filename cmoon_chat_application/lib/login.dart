@@ -42,7 +42,7 @@ class _LoginPageState extends State<LoginPage> {
         context,
         MaterialPageRoute(
           builder: (_) => DashboardPage(
-            userId: user['id'].toString(),
+            userId: user['id'],
             userName: user['name'],
             profilePic: user['profile_pic'] != null
                 ? "http://10.0.2.2:5000/uploads/profile_pics/${user['profile_pic']}"
